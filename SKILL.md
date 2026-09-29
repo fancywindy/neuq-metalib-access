@@ -2,14 +2,14 @@
 slug: neuq-metalib-access
 name: neuq-metalib-access
 displayName: 东大秦皇岛校内库检索（VPN 接管法）
-version: 1.1.0
+version: 1.2.0
 description: |
-  通过东北大学秦皇岛分校校园 WebVPN（vpn.neuq.edu.cn）混合接力，复用用户真实登录态检索校内 171 个 MetaLib 数据库
+  通过东北大学秦皇岛分校校园 WebVPN（vpn.neuq.edu.cn，简称 neuq / 校园VPN）混合接力，复用用户真实登录态检索校内 171 个 MetaLib 数据库
   （知网CNKI、万方、维普、Web of Science、Scopus、ScienceDirect、SpringerLink、ACS、IEEE、RSC、Wiley、
   CAS SciFinder-n、Derwent、CNIPA/中外专利、ProQuest 博硕、CSSCI、NSTL 等）。
-  当用户提到"用校内权限/学校VPN查某库""帮我查万方/WOS/知网/…""校内数据库检索""下知网/万方全文"
-  或提及 MetaLib 目录中任一具体库名（见 references/catalog.md）并要检索/下载/查新时触发。
-  仅限本校合法科研查阅，不突破访问限制。
+  当用户说"我需要 vpn / neuq / 校园VPN 查某库""用校内权限/校内库查 知网/万方/WOS/SciFinder/中外专利/…"
+  "帮我查新/下全文/做专利新颖性复核"，或提及 MetaLib 目录中任一具体库名（见 references/catalog.md）并要检索/下载/查新时触发。
+  典型场景：专利交底书（A1/A2/B1 等）对校内库做知网/WOS 新颖性复核。仅限本校合法科研查阅，不突破访问限制。
 author: 老吴
 agent_created: true
 user-invocable: true
@@ -45,14 +45,15 @@ ScienceDirect、Springer、ACS、IEEE、RSC、Wiley、SciFinder、Derwent、中�
 
 ### 抽取必须过滤页面 chrome（否则命中数严重失真）
 结果页混入大量导航/页脚链接（"AI阅读""我的CNKI""CAJViewer""CNKI AI""service.cnki.net"等），不滤会让命中数
-虚高数倍（实测 22/19/78 vs 真实文献 1/0/21）。本工具抽取已内置过滤（题名 ≥10 字且含中文）。
+虚高数倍（实测 22/19/78 vs 真实文献 1/0/21）。本工具抽取已内置过滤（导航/页脚 NOISE 黑名单 + 纯英文短导航跳过 + navi/bar 等 chrome 链接域名过滤）。
 
 ---
 
 ## 二、适用触发
 
-- "用校内权限查 万方 / WOS / 知网 / SciFinder / …""帮我下知网论文""学校 VPN 帮我查 Scopus"
+- "我需要 vpn / neuq / 校园VPN 查 XX 库""用校内权限/校内库查 万方/WOS/知网/SciFinder/中外专利/…""帮我查新/下全文"
 - 提到 MetaLib 目录中任一库名（见 references/catalog.md）并要检索 / 下载 / 查新
+- 专利交底书（A1/A2/B1/集成等）对校内库做新颖性复核时
 - SmartLib 额度耗尽、又要查校内专属库或下全文时
 - 与 `cnki-auth-access` 的关系：本技能是其**通用化升级**，覆盖全部 171 库；CNKI 单库场景旧技能仍可用。
 
@@ -81,6 +82,18 @@ $PY $REL --session-name neuq --library wos --query "chlorine dioxide photocataly
 > 若窗口停在登录页没反应：说明还没登录好，先登录。若点的不是真库页（广告/其他站）：关掉、回到门户重新点一次。
 > 若点击库后弹出「**统一身份认证 / CAS**」登录页：那是该库的 SSO，请也登录；登录后库页面才真正打开，脚本会自动等待该页（不会误把登录页当库页）。
 > 注意 cookie 数分钟过期，**弹窗后尽快登录+点库**，不要闲置。
+
+### 多式循环与拆短式（查新 / 多关键词必看）
+
+- **一次接管跑多式**：`--query` 可给多个值，脚本在同一接管会话内依次检索并汇总，你只需登录 + 点库一次：
+  ```bash
+  $PY $REL --session-name neuq --library cnki --query "单原子铁 氨氮" "单原子铁 光催化" "氨氮 光催化 选择性" "磁性 氨氮 光催化"
+  ```
+  结果按式分列写入 `sessions/<library>_result.json`（B1 复核即用此法）。
+- **知网多词 AND 会失效（必拆短式）**：像「单原子铁 氨氮 选择性 光催化」这种 4 词检索，知网常不做严格 AND，返回大量无关（农药 / 医学 / 5G 等噪声）。
+  **必须拆成 2–3 词短式分别跑**，再人工判别交集。这是查新复核的标准做法。
+- **抽取过滤已内置**：结果页导航 / 页脚 / 期刊单位导航（AI阅读、我的CNKI、navi.cnki.net、bar.cnki.net、HTML阅读 等）已被过滤；
+  若个别库仍有残留噪声，对 `sessions/<library>_result.json` 按链接域名 / 标题做后处理即可。
 
 ### 备选 · 贴 URL 法（脆弱，仅当主路径不可用时）
 
