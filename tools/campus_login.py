@@ -24,6 +24,19 @@ import sys
 import time
 from pathlib import Path
 
+# 解释器自检：本技能必须用系统 Python 3.14（C:/Python314/python.exe），该解释器已预装 playwright 1.62。
+# 若误用托管 Python 3.13（默认 python，无 playwright）会触发重装——属症状而非需求。
+try:
+    from playwright.sync_api import sync_playwright  # noqa: F401
+except ImportError:
+    sys.stderr.write(
+        "ERROR: 当前 Python 解释器未安装 playwright。\n"
+        "本技能必须使用系统 Python 3.14（C:/Python314/python.exe），其已预装 playwright 1.62.0。\n"
+        "请改用：C:/Python314/python.exe tools/<脚本>.py ...\n"
+        "（不需要、也不应反复重装 playwright；脚本用 channel=msedge 驱动你已装的 Edge，不下载浏览器。）\n"
+    )
+    raise SystemExit(2)
+
 SESSIONS_DIR = Path(__file__).resolve().parent.parent / "sessions"
 DEFAULT_VPN = "https://vpn.neuq.edu.cn/"
 

@@ -23,6 +23,18 @@ import argparse, json, os, sys, time
 from pathlib import Path
 from datetime import datetime
 
+# 解释器自检：本技能必须用系统 Python 3.14（C:/Python314/python.exe），该解释器已预装 playwright 1.62。
+try:
+    from playwright.sync_api import sync_playwright  # noqa: F401
+except ImportError:
+    sys.stderr.write(
+        "ERROR: 当前 Python 解释器未安装 playwright。\n"
+        "本技能必须使用系统 Python 3.14（C:/Python314/python.exe），其已预装 playwright 1.62.0。\n"
+        "请改用：C:/Python314/python.exe tools/<脚本>.py ...\n"
+        "（不需要、也不应反复重装 playwright；脚本用 channel=msedge 驱动你已装的 Edge，不下载浏览器。）\n"
+    )
+    raise SystemExit(2)
+
 SESSIONS_DIR = Path(__file__).resolve().parent.parent / "sessions"
 
 STEALTH_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36 Edg/154.0.0.0"
@@ -80,6 +92,11 @@ EXTRACT_JS = """
     for (const a of anchors) {
       const t = (a.innerText || '').replace(/\\s+/g,' ').trim();
       if (t.length < 6 || t.length > 220) continue;
+      // 过滤页面 chrome/导航/页脚（否则命中数虚高数倍）
+      const NOISE = ['AI阅读','我的CNKI','CAJViewer','帮助中心','作者发文','出版来源','文献检索代码',
+        '查看全部更新','数字出版物','新浪微博','CNKI荣誉','网络出版服务','学位授予单位','知网研学',
+        '订卡热线','服务热线','官方微信','邮件咨询','购买知网卡','知网卡'];
+      if (t.startsWith('主题：') || t.startsWith('地址：') || NOISE.some(k => t.indexOf(k) >= 0)) continue;
       let link = '';
       try { link = new URL(a.href, location.href).href; } catch(e){ link = a.href || ''; }
       if (!link || link.includes('javascript:')) continue;
