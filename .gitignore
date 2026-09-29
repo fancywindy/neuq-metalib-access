@@ -1,0 +1,4 @@
+# 登录态 cookies 等同账号密码，严禁入库/外传
+sessions/
+*.json
+!catalog_raw.json
