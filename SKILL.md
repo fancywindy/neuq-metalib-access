@@ -146,3 +146,38 @@ ProQuest 博硕、JSTOR、Taylor&Francis、MDPI、Frontiers、Cell、NSTL(NEU002
 | 点「知网」没反应 | 启动器 runtime 检测，agent 不能自动点 | **你手动点**（在 agent 窗口里） |
 | 检索框找不到 / 命中数异常多 | 不同库 DOM 不同 / 未过滤 chrome | 不给 `--query` 先 dump 页面做选择器发现；抽取已内置过滤 |
 | `import playwright` 失败 | 用错解释器（托管 3.13） | 改 `C:/Python314/python.exe` |
+
+---
+
+## 九、WOS / Scopus 选择器与实测坑（2026-09-29 实跑验证）
+
+### WOS（Smart Search，Angular SPA）
+- **检索框**：`#composeQuerySmartSearch`（`name="search-main-box"`，placeholder 含 "Search documents"）。
+  `/wos/history`（Search History）页**没有**真正检索框，只有日期框 `mat-input-0/1`（aria-label "Start/End Date"）
+  和 cookie 列表框 `#vendor-search-handler`——**不要**把关键词填进这两类框。
+- **提交钮**：`button[data-ta="run-search"]`（`type="submit"`、`aria-label="Search"`、检索框**右侧圆形按钮**）。
+  注意它是**纯图标、无文字**，所以 `button:has-text('Search')` 匹配不到（会退化成按 Enter，可能不提交或跳错页）；
+  且初始 `disabled="true"`，键入后才启用 → 需先 `wait_for_state("enabled")` 再点。
+- **导航**：`/wos/history` 顶部 `#snHeaderLinkNavigation` 是 `<a>`（routerLink→`/wos/woscc/smart-search`）。
+  跳转请用 JS `el.click()` 触发 Angular 路由（保持 WebVPN 会话），**不要** `goto` 拼 URL（WebVPN 会拒）。
+- **结果**：条目链接含 `full-record`；总数在 `.tab-results-count`（如 "93 Records"）。
+  结果页**懒加载**，只 sleep 不滚动只能抽到 1 条 → 必须 `mouse.wheel` 滚动若干次再抽（可抽到 17–30 条）。
+
+### Scopus
+- **主检索框**：`input[id^="autosuggest-"]`（id 前缀固定、后半随机）。
+  ⚠️ 必须**排除** `data-testid="search-within-result-input"` / `name="searchName"`（"Search within results" 框），
+  否则它因含 "search" 被优先选中，关键词会填错框。
+- **提交钮**：蓝色放大镜图标按钮（检索框**右下方**），同样**无文字**。
+  正确做法：点主检索框所在 `form` 内的 `button[type="submit"]`；退化 `button[class*="primary"][class*="oneIcon"]`。
+  `button:has-text('Search')` 对它无效。
+- **结果**：条目链接含 `/pages/publications/`（带 `origin=resultslist`）；期刊名链接为 `/sourceid/` 需排除；
+  总数取正文 "N results"。宽泛抓所有 `<a>` 会抓进 "Skip to main content"/"SciVal"/Elsevier 页脚等噪声。
+
+### 通用坑
+- `button:has-text('Search')` **只匹配文字内容**，图标按钮（WOS `run-search`、Scopus 放大镜）一律漏掉 → 优先用
+  `data-ta` / `type=submit` / 表单内提交钮定位。
+- Playwright：`query_selector()` 返回 **ElementHandle**，**没有** `press_sequentially`（那是 **Locator** 的方法）；
+  元素句柄打字请用 `page.keyboard.type()`（先 `click/focus`，可先 Ctrl+A + Delete 清空）。
+- Edge 窗口可见性：**bash 前台启动的 Edge 用户看不到窗口**（无法登录/点库）→ 必须用 **PowerShell 工具**启动才在桌面可见。
+- 抽取器必须按库定制（WOS 用 `full-record`、Scopus 用 `/pages/publications/`），
+  否则 CNKI 版 `EXTRACT_JS` 会退化成抓 `document.body` 全部链接，命中数虚高或全是导航。

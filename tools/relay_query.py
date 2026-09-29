@@ -102,13 +102,89 @@ EXTRACT_JS = """
 }
 """
 
+WOS_EXTRACT_JS = """
+() => {
+  const out = [];
+  const seen = new Set();
+  const links = document.querySelectorAll('a');
+  for (const a of links) {
+    const href = a.href || '';
+    if (!href.includes('full-record')) continue;
+    const t = (a.innerText || '').replace(/\\s+/g, ' ').trim();
+    if (t.length < 10) continue;
+    if (seen.has(t)) continue;
+    seen.add(t);
+    out.push({title: t, link: href});
+  }
+  return out;
+}
+"""
+
+# 抽 WOS 结果总数（Smart Search 结果页顶部 .tab-results-count，如 "93 Records"）
+WOS_COUNT_JS = """
+() => {
+  const el = document.querySelector('.tab-results-count');
+  if (el) { const t = (el.innerText || el.textContent || '').trim(); if (t) return t; }
+  const m = document.body.innerText.match(/([\\d,]+)\\s*Records?/i);
+  return m ? m[1] + ' Records' : '';
+}
+"""
+
+# Scopus 抽取：结果标题多为 <a> 内的英文题名，宽泛抽取并过滤导航噪声
+# 严格只取 Scopus 结果条目（链接含 /pages/publications/），排除导航/期刊链接/页脚
+SCOPUS_EXTRACT_JS = """
+() => {
+  const out = []; const seen = new Set();
+  const links = document.querySelectorAll('a');
+  for (const a of links) {
+    const href = a.href || '';
+    if (!/scopus\\.com\\/pages\\/publications\\//.test(href)) continue;
+    let t = (a.innerText || '').replace(/\\s+/g, ' ')
+              .replace(/opens in a new tab/gi, '').replace(/Opens in a new tab/gi, '').trim();
+    if (t.length < 15) continue;
+    if (seen.has(t)) continue; seen.add(t);
+    out.push({title: t, link: href});
+  }
+  return out;
+}
+"""
+
+# Scopus 结果总数
+SCOPUS_COUNT_JS = """
+() => {
+  const m = document.body.innerText.match(/([\\d,]+)\\s+results?/i);
+  if (m) return m[1] + ' results';
+  const el = document.querySelector('[data-testid="results-count"], .resultsCount, #results-count');
+  return el ? (el.innerText || el.textContent || '').trim() : '';
+}
+"""
+
+# Scopus 提交：优先点主检索框所在 form 内的 submit 钮；退化点蓝色单图标（放大镜）主按钮
+SCOPUS_SUBMIT_JS = """
+(inp) => {
+  if (inp) {
+    const form = inp.closest('form');
+    if (form) {
+      const b = form.querySelector('button[type="submit"]');
+      if (b) { b.click(); return 'form-submit'; }
+    }
+  }
+  const oneIcon = document.querySelector('button[class*="primary"][class*="oneIcon"]');
+  if (oneIcon) { oneIcon.click(); return 'oneIcon'; }
+  const sub = document.querySelector('button[type="submit"]');
+  if (sub) { sub.click(); return 'any-submit'; }
+  return null;
+}
+"""
+
 SEARCH_HINTS = ('search', 'kw', 'key', '检索', 'query', 'txt', 'q', 'wd', 'head')
 
 
-def find_search_input(page):
-    """通用检索框探测：优先 id/name/placeholder 含检索相关词，否则取最宽可见文本输入。"""
+def find_search_input(page, wos=False):
+    """通用检索框探测：优先 id/name/placeholder 含检索相关词，否则取最宽可见文本输入。
+    wos=True 时额外打印候选框信息，便于诊断 WOS Smart Search 检索框识别。"""
     try:
-        cands = page.query_selector_all('input, textarea')
+        cands = page.query_selector_all('input, textarea, [contenteditable="true"], [role="textbox"]')
     except Exception:
         return None
     visible = []
@@ -125,16 +201,82 @@ def find_search_input(page):
         w = box['width'] if box else 0
         if w < 60:
             continue
+        ident = ((el.get_attribute('id') or '') + ' ' + (el.get_attribute('name') or '') + ' ' +
+                (el.get_attribute('placeholder') or '') + ' ' + (el.get_attribute('aria-label') or '')).lower()
+        # 排除日期/年份/起止/筛选/供应商搜索等框，只认真正的检索框（避免误填年份框）
+        if any(k in ident for k in ('date', 'yyyy', 'year', '年', 'vendor-search', 'start', 'end',
+                                    'search-within', 'searchname', 'within results')):
+            continue
         visible.append((el, w))
+        if wos:
+            print(f"    [WOS-debug] 候选框: id={el.get_attribute('id')!r} name={el.get_attribute('name')!r} "
+                  f"ph={el.get_attribute('placeholder')!r} aria={el.get_attribute('aria-label')!r} w={w:.0f}",
+                  file=sys.stderr, flush=True)
     if not visible:
+        if wos:
+            print("    [WOS-debug] 未找到任何可见文本输入（检索框识别失败）", file=sys.stderr, flush=True)
         return None
     for el, w in visible:
         ident = ((el.get_attribute('id') or '') + ' ' + (el.get_attribute('name') or '') + ' ' +
-                (el.get_attribute('placeholder') or '')).lower()
+                (el.get_attribute('placeholder') or '') + ' ' + (el.get_attribute('aria-label') or '')).lower()
         if any(k in ident for k in SEARCH_HINTS):
+            if wos:
+                print(f"    [WOS-debug] 命中关键词检索框: id={el.get_attribute('id')!r}", file=sys.stderr, flush=True)
             return el
-    # 兜底：最宽的可见文本输入框
-    return max(visible, key=lambda x: x[1])[0]
+    # 兜底：最宽的可见文本输入框（已排除日期/年份等）
+    chosen = max(visible, key=lambda x: x[1])[0]
+    if wos:
+        print(f"    [WOS-debug] 兜底取最宽框: id={chosen.get_attribute('id')!r} "
+              f"name={chosen.get_attribute('name')!r}", file=sys.stderr, flush=True)
+    return chosen
+
+
+def navigate_wos_to_smartsearch(lib):
+    """从 WOS 任意页（多为 /wos/history）跳到 Smart Search。
+    优先用 JS click 触发 Angular routerLink（保持 WebVPN 会话，无整页刷新）；
+    失败则 Playwright 真实点击；再失败则 goto 绝对 URL。返回是否成功跳到 smart-search。"""
+    try:
+        ss = lib.query_selector("#snHeaderLinkNavigation")
+        print(f"  [WOS] 找到 #snHeaderLinkNavigation? {ss is not None}", file=sys.stderr, flush=True)
+        if ss is None:
+            # 退化：尝试任意含 smart-search 的链接
+            ss = lib.query_selector("a[href*='smart-search']")
+            print(f"  [WOS] 退化：找到 a[href*='smart-search']? {ss is not None}", file=sys.stderr, flush=True)
+        if ss is None:
+            print("  [WOS] ⚠ 未找到 Smart Search 入口链接，放弃自动跳转", file=sys.stderr, flush=True)
+            return False
+        abs_href = lib.evaluate("(el)=>el.href", ss) or ""
+        print(f"  [WOS] Smart Search 绝对 URL: {abs_href[:140]}", file=sys.stderr, flush=True)
+        # 方法1：JS click 触发 Angular 路由（最稳，无整页刷新）
+        try:
+            lib.evaluate("(el)=>el.click()", ss)
+            lib.wait_for_url("**/smart-search**", timeout=15000)
+            print(f"  [WOS] ✓ JS click 跳转成功 -> {lib.url[:120]}", file=sys.stderr, flush=True)
+            return True
+        except Exception as e:
+            print(f"  [WOS] JS click 未触发跳转({e})，改 Playwright 真实点击", file=sys.stderr, flush=True)
+        # 方法2：Playwright 真实点击
+        try:
+            ss.scroll_into_view_if_needed()
+            ss.click(force=True, timeout=10000)
+            lib.wait_for_url("**/smart-search**", timeout=15000)
+            print(f"  [WOS] ✓ 真实点击跳转成功 -> {lib.url[:120]}", file=sys.stderr, flush=True)
+            return True
+        except Exception as e:
+            print(f"  [WOS] 真实点击也未跳转({e})，改 goto", file=sys.stderr, flush=True)
+        # 方法3：goto 绝对 URL
+        if abs_href:
+            try:
+                lib.goto(abs_href, wait_until="domcontentloaded", timeout=30000)
+                lib.wait_for_url("**/smart-search**", timeout=15000)
+                print(f"  [WOS] ✓ goto 跳转成功 -> {lib.url[:120]}", file=sys.stderr, flush=True)
+                return True
+            except Exception as e:
+                print(f"  [WOS] ⚠ goto 跳转失败: {e}", file=sys.stderr, flush=True)
+        return False
+    except Exception as e:
+        print(f"  [WOS] ⚠ 跳转 Smart Search 异常: {e}", file=sys.stderr, flush=True)
+        return False
 
 
 def find_submit_and_submit(page):
@@ -180,7 +322,13 @@ def is_library_page(page):
                 return False
         except Exception:
             pass
-        return bool(find_search_input(page))
+        # 库页识别：有检索框 或 URL 含库特征串（WOS 历史页无显式检索框，靠 URL 认）
+        LIB_SIGNS = ('cnki', 'wanfang', 'webofscience', 'woscc', 'scopus', 'sciencedirect',
+                     'springer', 'ieee', 'acs', 'rsc', 'wiley', 'derwent', 'engineeringvillage',
+                     'ebsco', 'jstor', 'mdpi', 'frontiers', 'cell', 'nstl', 'cssci')
+        has_input = bool(find_search_input(page))
+        is_lib_url = any(s in u.lower() for s in LIB_SIGNS)
+        return is_lib_url or has_input
     except Exception:
         return False
 
@@ -205,7 +353,7 @@ def main() -> int:
         b = p.chromium.launch_persistent_context(
             user_data_dir=str(profile_dir), headless=False, channel=args.channel,
             user_agent=STEALTH_UA,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-popup-blocking"])
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-popup-blocking", "--disable-gpu"])
         b.add_init_script(STEALTH_JS)
         try:
             portal = b.new_page()
@@ -260,38 +408,207 @@ def main() -> int:
             # 多检索词：在同一接管会话内循环（避免重复登录）
             queries = args.query
             data = []
+            is_wos = (args.library == 'wos') or ('webofscience' in lib.url.lower()) or ('woscc' in lib.url.lower())
+            is_scopus = (args.library == 'scopus') or ('scopus' in lib.url.lower())
+            print(f"  [WOS?] is_wos={is_wos} [Scopus?] is_scopus={is_scopus} 当前URL={lib.url[:120]}", file=sys.stderr, flush=True)
+            if is_wos and '/wos/history' in lib.url:
+                ok = navigate_wos_to_smartsearch(lib)
+                if ok:
+                    # 等检索框出现并 dump 确认
+                    try:
+                        lib.wait_for_selector('textarea, input.mat-mdc-input-element, input[type="text"]',
+                                              timeout=20000)
+                    except Exception:
+                        pass
+                    time.sleep(5)
+                    try:
+                        Path(SESSIONS_DIR / 'wos_smartsearch.html').write_text(lib.content(), encoding='utf-8', errors='ignore')
+                        print(f"  [WOS] ✓ 已 dump Smart Search 页 -> sessions/wos_smartsearch.html", file=sys.stderr, flush=True)
+                    except Exception:
+                        pass
+                else:
+                    print(f"  [WOS] ⚠ 自动跳转失败；若你已在窗口手动进入 Smart Search，脚本会继续在当前页检索",
+                          file=sys.stderr, flush=True)
             for qi, q in enumerate(queries):
                 print(f"  ▶ 检索 [{qi+1}/{len(queries)}]: {q}", file=sys.stderr, flush=True)
-                box = find_search_input(lib)
-                if box is None:
-                    print(f"    ⚠ 未找到检索框，跳过该式", file=sys.stderr, flush=True)
-                    data.append({"query": q, "count": 0, "error": "no_box", "results": []})
-                    continue
-                try:
-                    box.fill(q)
-                except Exception:
-                    try:
-                        box.focus()
-                        lib.evaluate("(el,v)=>{el.value=v; el.dispatchEvent(new Event('input',{bubbles:true}));}",
-                                     box, q)
-                    except Exception:
+                if is_wos:
+                    # —— WOS：真实键入 + 点右侧 run-search 提交按钮 ——
+                    # 1) 定位检索框（优先 #composeQuerySmartSearch）
+                    box = lib.query_selector("#composeQuerySmartSearch") or find_search_input(lib, wos=True)
+                    if box is None:
+                        print(f"    ⚠ 未找到检索框，跳过该式", file=sys.stderr, flush=True)
+                        data.append({"query": q, "count": 0, "error": "no_box", "results": []})
+                        continue
+                    # 2) 清空并真实键入（Angular Material 用 press_sequentially 最稳；重试一次）
+                    ok_type = False
+                    for attempt in range(2):
+                        try:
+                            box.click()
+                            box.focus()
+                            lib.keyboard.press("Control+a")
+                            lib.keyboard.press("Delete")
+                            lib.keyboard.type(q, delay=40)
+                            ok_type = True
+                            break
+                        except Exception as e:
+                            print(f"    [WOS] 第{attempt+1}次键入异常: {e}", file=sys.stderr, flush=True)
+                            box = lib.query_selector("#composeQuerySmartSearch") or find_search_input(lib, wos=True)
+                            if box is None:
+                                break
+                    if not ok_type:
                         print(f"    ⚠ 检索框填词失败，跳过该式", file=sys.stderr, flush=True)
                         data.append({"query": q, "count": 0, "error": "fill_fail", "results": []})
                         continue
-                find_submit_and_submit(lib)
-                try:
-                    lib.wait_for_selector("#gridTable, #briefBox, .result-list, table.list, .doc-list", timeout=25000)
-                except Exception:
-                    pass
-                time.sleep(3)
-                try:
-                    html_path.write_text(lib.content(), encoding="utf-8", errors="ignore")
-                except Exception:
-                    pass
-                rows = lib.evaluate(EXTRACT_JS)[:args.max]
-                data.append({"query": q, "count": len(rows), "results": rows})
-                print(f"    ✓ {len(rows)} 条", file=sys.stderr, flush=True)
-                time.sleep(2)
+                    # 3) 点右侧 run-search 提交按钮（初始 disabled，键入后启用）
+                    try:
+                        btn = lib.query_selector("button[data-ta='run-search']") or \
+                              lib.query_selector("button[aria-label='Search'][type='submit']")
+                        if btn is not None:
+                            try:
+                                btn.wait_for_state("enabled", timeout=8000)
+                            except Exception:
+                                pass
+                            btn.click(timeout=8000)
+                            print(f"    [WOS] ✓ 点击 run-search 提交按钮", file=sys.stderr, flush=True)
+                        else:
+                            lib.keyboard.press("Enter")
+                            print(f"    [WOS] ⚠ 未找到 run-search 按钮，改 Enter 提交", file=sys.stderr, flush=True)
+                    except Exception as e:
+                        print(f"    [WOS] 提交按钮点击失败({e})，改 Enter", file=sys.stderr, flush=True)
+                        try:
+                            lib.keyboard.press("Enter")
+                        except Exception:
+                            pass
+                    # 4) 等结果并滚动加载更多卡片（WOS 结果页懒加载）
+                    try:
+                        lib.wait_for_selector("a[href*='full-record'], app-summary-record, .tab-results-count",
+                                              timeout=25000)
+                    except Exception:
+                        pass
+                    time.sleep(2)
+                    try:
+                        for _ in range(12):
+                            lib.mouse.wheel(0, 2000)
+                            time.sleep(1.0)
+                    except Exception:
+                        pass
+                    time.sleep(2)
+                    try:
+                        html_path.write_text(lib.content(), encoding="utf-8", errors="ignore")
+                    except Exception:
+                        pass
+                    total = ""
+                    try:
+                        total = lib.evaluate(WOS_COUNT_JS) or ""
+                    except Exception:
+                        pass
+                    rows = lib.evaluate(WOS_EXTRACT_JS)[:args.max]
+                    data.append({"query": q, "total_count": total, "count": len(rows), "results": rows})
+                    print(f"    ✓ 总数={total!r} 抽取{len(rows)} 条", file=sys.stderr, flush=True)
+                    time.sleep(2)
+                elif is_scopus:
+                    # —— Scopus 专用：主检索框 input[id^="autosuggest-"] + 蓝色放大镜提交钮 ——
+                    box = lib.query_selector('input[id^="autosuggest-"]') or find_search_input(lib, wos=False)
+                    if box is None:
+                        print(f"    ⚠ 未找到检索框，跳过该式", file=sys.stderr, flush=True)
+                        data.append({"query": q, "count": 0, "error": "no_box", "results": []})
+                        continue
+                    ok_type = False
+                    for attempt in range(2):
+                        try:
+                            box.click()
+                            box.focus()
+                            lib.keyboard.press("Control+a")
+                            lib.keyboard.press("Delete")
+                            lib.keyboard.type(q, delay=30)
+                            ok_type = True
+                            break
+                        except Exception as e:
+                            print(f"    [Scopus] 第{attempt+1}次键入异常: {e}", file=sys.stderr, flush=True)
+                            box = lib.query_selector('input[id^="autosuggest-"]') or find_search_input(lib, wos=False)
+                            if box is None:
+                                break
+                    if not ok_type:
+                        try:
+                            box.fill(q)
+                        except Exception:
+                            print(f"    ⚠ 检索框填词失败，跳过该式", file=sys.stderr, flush=True)
+                            data.append({"query": q, "count": 0, "error": "fill_fail", "results": []})
+                            continue
+                    how = ""
+                    try:
+                        how = lib.evaluate(SCOPUS_SUBMIT_JS, box) or ""
+                    except Exception as e:
+                        print(f"    [Scopus] 提交 JS 异常: {e}", file=sys.stderr, flush=True)
+                    if not how:
+                        find_submit_and_submit(lib)
+                        how = "fallback"
+                    print(f"    [Scopus] 提交方式={how}", file=sys.stderr, flush=True)
+                    try:
+                        lib.wait_for_selector("a[href*='/pages/publications/']", timeout=25000)
+                    except Exception:
+                        print(f"    [Scopus] 未等到结果条目链接（可能该式无结果）", file=sys.stderr, flush=True)
+                    try:
+                        for _ in range(12):
+                            lib.mouse.wheel(0, 2000)
+                            time.sleep(1.0)
+                    except Exception:
+                        pass
+                    time.sleep(3)
+                    try:
+                        html_path.write_text(lib.content(), encoding="utf-8", errors="ignore")
+                    except Exception:
+                        pass
+                    rows = lib.evaluate(SCOPUS_EXTRACT_JS)[:args.max]
+                    total = ""
+                    try:
+                        total = lib.evaluate(SCOPUS_COUNT_JS) or ""
+                    except Exception:
+                        pass
+                    data.append({"query": q, "total_count": total, "count": len(rows), "results": rows})
+                    print(f"    ✓ 总数={total!r} 抽取{len(rows)} 条", file=sys.stderr, flush=True)
+                    time.sleep(2)
+                else:
+                    # —— 非 WOS/Scopus（CNKI 等）：原逻辑 ——
+                    extract_js = EXTRACT_JS
+                    box = find_search_input(lib, wos=False)
+                    if box is None:
+                        print(f"    ⚠ 未找到检索框，跳过该式", file=sys.stderr, flush=True)
+                        data.append({"query": q, "count": 0, "error": "no_box", "results": []})
+                        continue
+                    try:
+                        box.fill(q)
+                    except Exception:
+                        try:
+                            box.focus()
+                            lib.evaluate("(el,v)=>{el.value=v; el.dispatchEvent(new Event('input',{bubbles:true}));}",
+                                         box, q)
+                        except Exception:
+                            print(f"    ⚠ 检索框填词失败，跳过该式", file=sys.stderr, flush=True)
+                            data.append({"query": q, "count": 0, "error": "fill_fail", "results": []})
+                            continue
+                    find_submit_and_submit(lib)
+                    try:
+                        lib.wait_for_selector("a[href*='record'], .result-item, .search-results, article, a[href*='abs']",
+                                              timeout=25000)
+                    except Exception:
+                        pass
+                    if is_scopus:
+                        try:
+                            for _ in range(12):
+                                lib.mouse.wheel(0, 2000)
+                                time.sleep(1.0)
+                        except Exception:
+                            pass
+                    time.sleep(3)
+                    try:
+                        html_path.write_text(lib.content(), encoding="utf-8", errors="ignore")
+                    except Exception:
+                        pass
+                    rows = lib.evaluate(extract_js)[:args.max]
+                    data.append({"query": q, "count": len(rows), "results": rows})
+                    print(f"    ✓ {len(rows)} 条", file=sys.stderr, flush=True)
+                    time.sleep(2)
             payload = {"library": args.library, "url": lib.url, "title": page_title,
                        "queries": len(queries), "data": data,
                        "note": "multi-query takeover run; results filtered by tightened EXTRACT_JS"}
