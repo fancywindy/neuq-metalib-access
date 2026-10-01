@@ -54,12 +54,6 @@ STEALTH_JS = """() => {
 EXTRACT_JS = """
 () => {
   const out = [];
-  const containers = [
-    document.querySelector('#gridTable'), document.querySelector('#briefBox'),
-    document.querySelector('#results'), document.querySelector('.result-list'),
-    document.querySelector('table.list'), document.querySelector('.doc-list'),
-    document.body
-  ].filter(Boolean);
   const seen = new Set();
   const NOISE = ['AI阅读','我的CNKI','CAJViewer','帮助中心','作者发文','出版来源','文献检索代码',
     '查看全部更新','数字出版物','新浪微博','CNKI荣誉','网络出版服务','学位授予单位','知网研学',
@@ -71,33 +65,48 @@ EXTRACT_JS = """
   const CHROME_LINK = ['ai.cnki.net','piccache.cnki.net','oversea.cnki.net','service.cnki.net',
     'mailto:','cnki.net/other','kdn/index','help@cnki.net','help.cnki.net',
     'navi.cnki.net','bar.cnki.net'];
-  for (const root of containers) {
-    const anchors = root.querySelectorAll('a');
-    for (const a of anchors) {
-      const t = (a.innerText || '').replace(/\\s+/g,' ').trim();
-      if (t.length < 6 || t.length > 220) continue;
-      if (t.startsWith('主题：') || t.startsWith('地址：') || NOISE.some(k => t.indexOf(k) >= 0)) continue;
-      // 跳过纯英文短导航（如 CNKI AI / oversea.cnki.net / service.cnki.net）
-      if (!/[一-龥]/.test(t) && t.length < 14) continue;
-      let link = '';
-      try { link = new URL(a.href, location.href).href; } catch(e){ link = a.href || ''; }
-      if (!link || link.includes('javascript:')) continue;
-      if (CHROME_LINK.some(k => link.indexOf(k) >= 0)) continue;
-      const key = link || t;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      let authors='', source='', date='';
-      const row = a.closest('tr, li, .doc-item, .result-item, div[class*=item]');
-      if (row) {
-        const txt = row.innerText.replace(/\\s+/g,' ').trim();
-        const m = txt.match(/(\\d{4}[-/.]?\\d{0,2}[-/.]?\\d{0,2})/);
-        date = m ? m[1] : '';
-        const parts = txt.split(/[\\s　]+/).filter(Boolean);
-        if (parts.length > 1) { authors = parts.slice(1,4).join(' '); source = parts[parts.length-1]||''; }
+  function walk(doc){
+    if(!doc) return;
+    const containers = [
+      doc.querySelector('#gridTable'), doc.querySelector('#briefBox'),
+      doc.querySelector('#results'), doc.querySelector('.result-list'),
+      doc.querySelector('table.list'), doc.querySelector('.doc-list'),
+      doc.body
+    ].filter(Boolean);
+    for (const root of containers) {
+      const anchors = root.querySelectorAll('a');
+      for (const a of anchors) {
+        const t = (a.innerText || '').replace(/\\s+/g,' ').trim();
+        if (t.length < 6 || t.length > 220) continue;
+        if (t.startsWith('主题：') || t.startsWith('地址：') || NOISE.some(k => t.indexOf(k) >= 0)) continue;
+        // 跳过纯英文短导航（如 CNKI AI / oversea.cnki.net / service.cnki.net）
+        if (!/[一-龥]/.test(t) && t.length < 14) continue;
+        let link = '';
+        try { link = new URL(a.href, location.href).href; } catch(e){ link = a.href || ''; }
+        if (!link || link.includes('javascript:')) continue;
+        if (CHROME_LINK.some(k => link.indexOf(k) >= 0)) continue;
+        const key = link || t;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        let authors='', source='', date='';
+        const row = a.closest('tr, li, .doc-item, .result-item, div[class*=item]');
+        if (row) {
+          const txt = row.innerText.replace(/\\s+/g,' ').trim();
+          const m = txt.match(/(\\d{4}[-/.]?\\d{0,2}[-/.]?\\d{0,2})/);
+          date = m ? m[1] : '';
+          const parts = txt.split(/[\\s　]+/).filter(Boolean);
+          if (parts.length > 1) { authors = parts.slice(1,4).join(' '); source = parts[parts.length-1]||''; }
+        }
+        out.push({title: t, link: link, authors: authors, source: source, date: date});
       }
-      out.push({title: t, link: link, authors: authors, source: source, date: date});
     }
   }
+  walk(document);
+  // 跨 iframe 抽取（知网结果常嵌在 iframe 内）
+  try {
+    const ifs = document.querySelectorAll('iframe');
+    for (const f of ifs) { try { walk(f.contentDocument); } catch(e){} }
+  } catch(e){}
   return out;
 }
 """
@@ -184,7 +193,20 @@ def find_search_input(page, wos=False):
     """通用检索框探测：优先 id/name/placeholder 含检索相关词，否则取最宽可见文本输入。
     wos=True 时额外打印候选框信息，便于诊断 WOS Smart Search 检索框识别。"""
     try:
-        cands = page.query_selector_all('input, textarea, [contenteditable="true"], [role="textbox"]')
+        cands = []
+        try:
+            cands += list(page.query_selector_all('input, textarea, [contenteditable="true"], [role="textbox"]'))
+        except Exception:
+            pass
+        # 跨 iframe 收集（知网等库的检索框常在 iframe 内，顶层 document 查不到）
+        try:
+            for _fr in page.frames:
+                try:
+                    cands += list(_fr.query_selector_all('input, textarea, [contenteditable="true"], [role="textbox"]'))
+                except Exception:
+                    continue
+        except Exception:
+            pass
     except Exception:
         return None
     visible = []
@@ -322,6 +344,10 @@ def is_library_page(page):
                 return False
         except Exception:
             pass
+        # WebVPN 把真实主机十六进制改写（如 vpn.neuq.edu.cn/https/77726476706e...），
+        # URL 不再含 'cnki'；改用页面标题识别常见库（CAS/统一身份认证已在上方排除，安全）
+        if any(k in t for k in ('知网', '中国知网', '国家知识基础设施')) or 'CNKI' in t.upper():
+            return True
         # 库页识别：有检索框 或 URL 含库特征串（WOS 历史页无显式检索框，靠 URL 认）
         LIB_SIGNS = ('cnki', 'wanfang', 'webofscience', 'woscc', 'scopus', 'sciencedirect',
                      'springer', 'ieee', 'acs', 'rsc', 'wiley', 'derwent', 'engineeringvillage',
@@ -591,6 +617,10 @@ def main() -> int:
                     try:
                         lib.wait_for_selector("a[href*='record'], .result-item, .search-results, article, a[href*='abs']",
                                               timeout=25000)
+                    except Exception:
+                        pass
+                    try:
+                        lib.screenshot(path=str(SESSIONS_DIR / f"{args.library}_q{qi+1}.png"), full_page=True)
                     except Exception:
                         pass
                     if is_scopus:
